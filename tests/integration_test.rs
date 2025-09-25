@@ -103,23 +103,23 @@ fn test_element_filtering() {
     });
 
     // Test single tag filters
-    let amenity_filter = vec!["amenity".to_string()];
+    let amenity_filter = vec![vec!["amenity".to_string()]];
     assert!(node_element.matches_filter(&amenity_filter));
     assert!(!way_element.matches_filter(&amenity_filter));
     assert!(!relation_element.matches_filter(&amenity_filter));
 
-    let highway_filter = vec!["highway".to_string()];
+    let highway_filter = vec![vec!["highway".to_string()]];
     assert!(!node_element.matches_filter(&highway_filter));
     assert!(way_element.matches_filter(&highway_filter));
     assert!(!relation_element.matches_filter(&highway_filter));
 
-    let type_filter = vec!["type".to_string()];
+    let type_filter = vec![vec!["type".to_string()]];
     assert!(!node_element.matches_filter(&type_filter));
     assert!(!way_element.matches_filter(&type_filter));
     assert!(relation_element.matches_filter(&type_filter));
 
     // Test multi tag filter
-    let multi_filter = vec!["amenity".to_string(), "highway".to_string()];
+    let multi_filter = vec![vec!["amenity".to_string()], vec!["highway".to_string()]];
     assert!(node_element.matches_filter(&multi_filter));
     assert!(way_element.matches_filter(&multi_filter));
     assert!(!relation_element.matches_filter(&multi_filter));

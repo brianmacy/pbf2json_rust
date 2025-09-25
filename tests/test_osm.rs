@@ -83,10 +83,10 @@ fn test_osm_element_matches_filter() {
 
     let element = OsmElement::Way(way);
 
-    assert!(element.matches_filter(&["highway".to_string()]));
-    assert!(element.matches_filter(&["name".to_string()]));
-    assert!(!element.matches_filter(&["building".to_string()]));
-    assert!(element.matches_filter(&["building".to_string(), "highway".to_string()]));
+    assert!(element.matches_filter(&[vec!["highway".to_string()]]));
+    assert!(element.matches_filter(&[vec!["name".to_string()]]));
+    assert!(!element.matches_filter(&[vec!["building".to_string()]]));
+    assert!(element.matches_filter(&[vec!["building".to_string()], vec!["highway".to_string()]]));
     assert!(element.matches_filter(&[]));
 }
 

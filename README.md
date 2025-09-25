@@ -6,11 +6,16 @@ A fast, memory-efficient Rust implementation of [pbf2json](https://github.com/pe
 
 ## Features
 
+- **Enhanced tag filtering**: Advanced AND/OR/wildcard filtering surpassing original pbf2json
+  - **OR logic**: `highway,building` (comma-separated)
+  - **AND logic**: `addr:street+name` (plus-separated)
+  - **Wildcards**: `addr*`, `*:en`, `addr:*:zh` (prefix/suffix/middle patterns)
+  - **Complex combinations**: `addr*+name,tourism+*:en,highway`
 - **Memory-efficient streaming**: Processes large PBF files with bounded memory usage (configurable 8GB limit)
-- **Tag filtering**: Filter OSM elements by specific tags (e.g., `highway`, `building`)
-- **Multiple geometries**: Converts nodes to Points, ways to LineStrings or Polygons, and relations to features with metadata
-- **Fast processing**: Memory monitoring and chunked processing for optimal performance
-- **Flexible output**: Pretty-print JSON or compact output to file or stdout
+- **Complete geometry support**: Three-pass processing for relations with centroids and bounds (small files)
+- **Planet-scale processing**: Handles 82GB+ files with automatic strategy selection
+- **High-performance parallel**: 500-1400%+ CPU utilization across multiple cores
+- **Flexible output**: JSON Lines format compatible with jq, CSV export, and analysis tools
 
 ## Installation
 
@@ -41,16 +46,51 @@ pbf2json input.osm.pbf -p -o output.geojson
 
 ### Advanced Usage Examples
 
-#### Tag Filtering
+#### Enhanced Tag Filtering
+
+**Basic OR Logic (comma-separated)**:
 ```bash
-# Filter only highways and buildings
-pbf2json input.osm.pbf --tags highway,building -o filtered.geojson
+# Filter highways OR buildings
+pbf2json input.osm.pbf --tags highway,building -o filtered.json
 
-# Filter address data
+# Filter address data (any element with addr:housenumber OR addr:street)
 pbf2json input.osm.pbf --tags "addr:housenumber,addr:street" -o addresses.json
+```
 
-# Filter amenities with full geometry
-pbf2json city.osm.pbf -t amenity --geometry full -o amenities.geojson
+**Advanced AND Logic (plus-separated)**:
+```bash
+# Filter elements with BOTH addr:street AND name tags
+pbf2json input.osm.pbf --tags "addr:street+name" -o named-addresses.json
+
+# Filter restaurants with names (amenity=restaurant AND name exists)
+pbf2json input.osm.pbf --tags "amenity+name" -o named-amenities.json
+```
+
+**Wildcard Pattern Matching**:
+```bash
+# All elements with any tags
+pbf2json input.osm.pbf --tags "*" -o all-tagged.json
+
+# Any address-related tags (addr:street, addr:housenumber, addr:city, etc.)
+pbf2json input.osm.pbf --tags "addr*" -o addresses.json
+
+# Multilingual names (name:en, name:fr, name:zh, etc.)
+pbf2json input.osm.pbf --tags "*:en,*:fr" -o multilingual.json
+
+# Complex: address tags AND amenity, OR any name variant
+pbf2json input.osm.pbf --tags "addr*+amenity,name*" -o complex.json
+```
+
+**Real-World Examples**:
+```bash
+# Complete address data with names
+pbf2json region.osm.pbf --tags "addr:street+addr:housenumber+name" -o complete-addresses.json
+
+# Tourism POIs in multiple languages
+pbf2json city.osm.pbf --tags "tourism+name*" -o tourism-multilingual.json
+
+# Transportation with address information
+pbf2json city.osm.pbf --tags "public_transport+addr*,railway+addr*" -o transport-addresses.json
 ```
 
 #### File Size Optimization
@@ -82,35 +122,38 @@ pbf2json large-file.pbf --parallel --tags highway -o roads.json
 # Extract all address data (most common use case)
 pbf2json planet.osm.pbf --tags "addr:housenumber,addr:street" -o addresses.json
 
-# Regional address extraction with full geometry
-pbf2json city.osm.pbf --geometry full --tags "addr:housenumber,addr:street,addr:city" -o city-addresses.json
+# Complete addresses with names (enhanced filtering)
+pbf2json region.osm.pbf --tags "addr*+name" -o named-addresses.json
 
-# Specific address components
-pbf2json region.osm.pbf --tags "addr:housenumber,addr:street,addr:postcode" -o postal-addresses.json
+# All address-related tags using wildcards
+pbf2json city.osm.pbf --tags "addr*" -o all-addresses.json
+
+# Complex: complete addresses OR named places
+pbf2json region.osm.pbf --tags "addr:street+addr:housenumber,name+place" -o locations.json
 ```
 
 ### 🛣️ Transportation Networks
 ```bash
-# Extract road network
-pbf2json region.osm.pbf --tags highway -o roads.json
+# Extract road network with names
+pbf2json region.osm.pbf --tags "highway+name" -o named-roads.json
 
-# Public transport infrastructure
-pbf2json city.osm.pbf --tags "public_transport,railway,bus,subway" -o transit.json
+# All transportation infrastructure
+pbf2json city.osm.pbf --tags "highway*,railway*,public_transport" -o transport.json
 
-# Pedestrian and cycling infrastructure
-pbf2json city.osm.pbf --tags "highway,footway,cycleway,path" -o pedestrian.json
+# Multilingual transport names
+pbf2json city.osm.pbf --tags "railway+name*,highway+*:en" -o transport-multilingual.json
 ```
 
 ### 🏢 Points of Interest (POI)
 ```bash
-# Extract all amenities
-pbf2json city.osm.pbf --geometry full --tags amenity -o amenities.json
+# Named amenities with addresses
+pbf2json city.osm.pbf --tags "amenity+name+addr*" -o complete-pois.json
 
-# Business and retail locations
-pbf2json region.osm.pbf --tags "shop,office,craft,tourism" -o business.json
+# All business locations
+pbf2json region.osm.pbf --tags "shop*,office*,amenity*" -o business.json
 
-# Healthcare and education
-pbf2json region.osm.pbf --tags "amenity=hospital,amenity=school,amenity=university" -o services.json
+# Multilingual tourism POIs
+pbf2json city.osm.pbf --tags "tourism+name*,amenity+*:en+*:fr" -o tourism-i18n.json
 ```
 
 ### 🌍 Large-Scale Processing
@@ -130,27 +173,27 @@ pbf2json large-region.pbf --parallel --tags amenity -o pois.json
 
 ### 🔍 Specialized Extractions
 ```bash
-# Relations with complete geometry (small files only)
-pbf2json city.osm.pbf --geometry full --tags "type=multipolygon" -o polygons.json
+# Complete multipolygon relations with names (small files only)
+pbf2json city.osm.pbf --geometry full --tags "type+name*" -o named-relations.json
 
-# Natural features
-pbf2json region.osm.pbf --tags "natural,landuse,leisure" -o natural-features.json
+# All natural and recreational areas
+pbf2json region.osm.pbf --tags "natural*,landuse*,leisure*" -o outdoor-areas.json
 
-# Administrative boundaries
-pbf2json country.osm.pbf --tags "boundary=administrative" -o boundaries.json
+# Administrative boundaries with multilingual names
+pbf2json country.osm.pbf --tags "boundary+name*,admin_level+*:local" -o boundaries-i18n.json
 ```
 
 ### 📊 Data Analysis Workflows
 ```bash
-# Extract and pipe to jq for analysis
-pbf2json city.osm.pbf --tags amenity | jq '.tags.amenity' | sort | uniq -c
+# Analyze all amenities with names
+pbf2json city.osm.pbf --tags "amenity+name" | jq '.tags.amenity' | sort | uniq -c
 
-# Count features by type
-pbf2json region.osm.pbf --tags highway | jq -r '.tags.highway' | sort | uniq -c
+# Export complete address data with enhanced filtering
+pbf2json region.osm.pbf --tags "addr*+name" | \
+  jq -r '[.tags.name, .tags."addr:street", .tags."addr:housenumber", .lat, .lon] | @csv'
 
-# Export specific fields to CSV
-pbf2json addresses.osm.pbf --tags "addr:housenumber,addr:street" | \
-  jq -r '[.tags."addr:housenumber", .tags."addr:street", .lat, .lon] | @csv'
+# Multilingual name analysis
+pbf2json city.osm.pbf --tags "name*" | jq '.tags | keys[] | select(startswith("name"))'
 ```
 
 ### Command Line Options
@@ -163,7 +206,11 @@ ARGUMENTS:
 
 OPTIONS:
     -o, --output <FILE>     Output JSON file (stdout if not specified)
-    -t, --tags <TAGS>       Comma-separated list of tags to filter (e.g., highway,building)
+    -t, --tags <TAGS>       Enhanced tag filtering with AND/OR/wildcard support:
+                            • OR logic: highway,building
+                            • AND logic: addr:street+name
+                            • Wildcards: addr*, *:en, addr:*:zh
+                            • Complex: addr*+name,tourism+*:en
     -g, --geometry <LEVEL>  Geometry computation level: auto, basic, full [default: auto]
     -p, --pretty            Pretty-print JSON output
         --parallel          Enable parallel processing for >800% CPU utilization

@@ -15,7 +15,7 @@ const CHUNK_SIZE: usize = 10_000; // Process elements in chunks for streaming ou
 pub fn convert_pbf_to_geojson_parallel(
     input_path: &str,
     output_path: Option<&String>,
-    tag_filter: Option<Vec<String>>,
+    tag_filter: Option<Vec<Vec<String>>>,
     pretty_print: bool,
 ) -> Result<()> {
     println!("🚀 Starting parallel PBF processing...");
@@ -49,7 +49,10 @@ pub fn convert_pbf_to_geojson_parallel(
 
                 // Progress reporting
                 if batch_count % 100 == 0 {
-                    eprintln!("📊 Processed {} batches, {} total features", batch_count, total_features);
+                    eprintln!(
+                        "📊 Processed {} batches, {} total features",
+                        batch_count, total_features
+                    );
                     if let Some(memory_usage) = get_memory_usage_mb() {
                         eprintln!("🧠 Memory usage: {} MB", memory_usage);
                     }
@@ -57,7 +60,10 @@ pub fn convert_pbf_to_geojson_parallel(
             }
 
             writer.flush()?;
-            eprintln!("✅ Parallel streaming complete. Total features: {}", total_features);
+            eprintln!(
+                "✅ Parallel streaming complete. Total features: {}",
+                total_features
+            );
             Ok(())
         })
     };
@@ -68,45 +74,50 @@ pub fn convert_pbf_to_geojson_parallel(
     let blob_reader = BlobReader::new(buf_reader);
 
     // Process blobs in parallel using rayon
-    let processing_result: Result<()> = blob_reader
-        .par_bridge()
-        .try_for_each(|blob_result| -> Result<()> {
-            let blob = blob_result.context("Failed to read blob")?;
+    let processing_result: Result<()> =
+        blob_reader
+            .par_bridge()
+            .try_for_each(|blob_result| -> Result<()> {
+                let blob = blob_result.context("Failed to read blob")?;
 
-            match blob.decode() {
-                Ok(BlobDecode::OsmData(block)) => {
-                    // Process all elements in this block in parallel
-                    let json_results: Vec<String> = block
-                        .elements()
-                        .par_bridge()
-                        .filter_map(|element| process_element_to_json(element, &tag_filter_clone, pretty_print))
-                        .collect();
+                match blob.decode() {
+                    Ok(BlobDecode::OsmData(block)) => {
+                        // Process all elements in this block in parallel
+                        let json_results: Vec<String> = block
+                            .elements()
+                            .par_bridge()
+                            .filter_map(|element| {
+                                process_element_to_json(element, &tag_filter_clone, pretty_print)
+                            })
+                            .collect();
 
-                    // Send results in chunks to maintain bounded memory
-                    for chunk in json_results.chunks(CHUNK_SIZE) {
-                        if tx.send(chunk.to_vec()).is_err() {
-                            return Err(anyhow::anyhow!("Output channel closed"));
+                        // Send results in chunks to maintain bounded memory
+                        for chunk in json_results.chunks(CHUNK_SIZE) {
+                            if tx.send(chunk.to_vec()).is_err() {
+                                return Err(anyhow::anyhow!("Output channel closed"));
+                            }
                         }
                     }
+                    Ok(BlobDecode::OsmHeader(_)) => {
+                        // Skip header blobs
+                    }
+                    Ok(BlobDecode::Unknown(_)) => {
+                        // Skip unknown blobs
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("Blob decode error: {}", e)),
                 }
-                Ok(BlobDecode::OsmHeader(_)) => {
-                    // Skip header blobs
-                }
-                Ok(BlobDecode::Unknown(_)) => {
-                    // Skip unknown blobs
-                }
-                Err(e) => return Err(anyhow::anyhow!("Blob decode error: {}", e)),
-            }
 
-            Ok(())
-        });
+                Ok(())
+            });
 
     // Close the channel to signal completion
     drop(tx);
 
     // Wait for output thread and processing to complete
     processing_result?;
-    output_thread.join().map_err(|_| anyhow::anyhow!("Output thread panicked"))??;
+    output_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("Output thread panicked"))??;
 
     println!("🎉 Parallel processing completed successfully!");
     Ok(())
@@ -115,7 +126,7 @@ pub fn convert_pbf_to_geojson_parallel(
 /// Process a single element and convert to JSON if it matches filters
 fn process_element_to_json(
     element: Element,
-    tag_filter: &Option<Vec<String>>,
+    tag_filter: &Option<Vec<Vec<String>>>,
     pretty_print: bool,
 ) -> Option<String> {
     let osm_element = match element {
@@ -186,9 +197,10 @@ fn process_element_to_json(
 
     // Apply tag filter if specified
     if let Some(filter_tags) = tag_filter
-        && !osm_element.matches_filter(filter_tags) {
-            return None;
-        }
+        && !osm_element.matches_filter(filter_tags)
+    {
+        return None;
+    }
 
     // Skip elements without tags
     match &osm_element {
@@ -244,17 +256,21 @@ fn convert_way_to_json(way: &OsmWay, pretty_print: bool) -> Option<String> {
 fn convert_relation_to_json(relation: &OsmRelation, pretty_print: bool) -> Option<String> {
     use serde_json::json;
 
-    let members: Vec<serde_json::Value> = relation.members.iter().map(|member| {
-        json!({
-            "type": match member.member_type {
-                MemberType::Node => "node",
-                MemberType::Way => "way",
-                MemberType::Relation => "relation",
-            },
-            "ref": member.member_id,
-            "role": member.role
+    let members: Vec<serde_json::Value> = relation
+        .members
+        .iter()
+        .map(|member| {
+            json!({
+                "type": match member.member_type {
+                    MemberType::Node => "node",
+                    MemberType::Way => "way",
+                    MemberType::Relation => "relation",
+                },
+                "ref": member.member_id,
+                "role": member.role
+            })
         })
-    }).collect();
+        .collect();
 
     let record = json!({
         "id": relation.id,

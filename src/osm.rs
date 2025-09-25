@@ -71,12 +71,65 @@ impl OsmElement {
         self.tags().get(key)
     }
 
-    pub fn matches_filter(&self, filter_tags: &[String]) -> bool {
+    pub fn matches_filter(&self, filter_tags: &[Vec<String>]) -> bool {
         if filter_tags.is_empty() {
             return true;
         }
 
-        filter_tags.iter().any(|tag| self.has_tag(tag))
+        // OR logic between groups: any group that matches makes the element match
+        filter_tags.iter().any(|and_group| {
+            // AND logic within group: all tags in the group must match
+            and_group
+                .iter()
+                .all(|tag_pattern| self.matches_tag_pattern(tag_pattern))
+        })
+    }
+
+    /// Check if element matches a tag pattern (supports wildcards with *)
+    pub fn matches_tag_pattern(&self, pattern: &str) -> bool {
+        if pattern == "*" {
+            // Special case: '*' matches any element that has at least one tag
+            return !self.tags().is_empty();
+        }
+
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            // Prefix wildcard: "addr*" matches "addr:street", "addr:housenumber", etc.
+            return self.tags().keys().any(|key| key.starts_with(prefix));
+        }
+
+        if let Some(suffix) = pattern.strip_prefix('*') {
+            // Suffix wildcard: "*:en" matches "name:en", "addr:street:en", etc.
+            return self.tags().keys().any(|key| key.ends_with(suffix));
+        }
+
+        if pattern.contains('*') {
+            // Middle wildcard: "addr:*:en" matches "addr:street:en", etc.
+            let parts: Vec<&str> = pattern.split('*').collect();
+            return self.tags().keys().any(|key| {
+                let mut key_pos = 0;
+                for (i, part) in parts.iter().enumerate() {
+                    if part.is_empty() {
+                        continue;
+                    }
+                    if let Some(found_pos) = key[key_pos..].find(part) {
+                        key_pos += found_pos + part.len();
+                        // For the last part, it must be at the end (unless it's empty)
+                        if i == parts.len() - 1
+                            && key_pos != key.len()
+                            && !parts.last().unwrap().is_empty()
+                        {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+
+        // Exact match: no wildcards
+        self.has_tag(pattern)
     }
 }
 

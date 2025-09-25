@@ -2,28 +2,7 @@
 #[cfg(test)]
 mod benchmark_tests {
     use std::process::Command;
-    use std::time::{Duration, Instant};
-    use tempfile::NamedTempFile;
-
-    // Helper function to get CPU usage percentage
-    fn get_cpu_usage() -> Option<f64> {
-        #[cfg(target_os = "linux")]
-        {
-            // Use top command to get current CPU usage
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg("top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1")
-                .output()
-                .ok()?;
-
-            let cpu_str = String::from_utf8(output.stdout).ok()?;
-            cpu_str.trim().parse().ok()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            None
-        }
-    }
+    use std::time::Instant;
 
     #[test]
     fn test_cpu_core_availability() {
@@ -31,19 +10,25 @@ mod benchmark_tests {
         println!("🖥️  Available CPU cores: {}", num_cpus);
 
         // Log system info for benchmark context
-        if let Ok(output) = Command::new("uname").arg("-a").output() {
-            if let Ok(system_info) = String::from_utf8(output.stdout) {
-                println!("🔍 System: {}", system_info.trim());
-            }
+        if let Ok(output) = Command::new("uname").arg("-a").output()
+            && let Ok(system_info) = String::from_utf8(output.stdout)
+        {
+            println!("🔍 System: {}", system_info.trim());
         }
 
         // Check if we have enough cores for >800% utilization
         assert!(num_cpus >= 1, "Need at least 1 CPU core");
         if num_cpus >= 8 {
-            println!("✅ System has {} cores - capable of >800% CPU utilization", num_cpus);
+            println!(
+                "✅ System has {} cores - capable of >800% CPU utilization",
+                num_cpus
+            );
         } else {
-            println!("⚠️  System has only {} cores - max theoretical utilization: {}%",
-                    num_cpus, num_cpus * 100);
+            println!(
+                "⚠️  System has only {} cores - max theoretical utilization: {}%",
+                num_cpus,
+                num_cpus * 100
+            );
         }
     }
 
@@ -56,16 +41,18 @@ mod benchmark_tests {
             println!("📊 Initial memory usage: {} MB", initial_memory);
 
             // Simulate processing workload
-            let _large_data: Vec<String> = (0..10000)
-                .map(|i| format!("test_element_{}", i))
-                .collect();
+            let _large_data: Vec<String> =
+                (0..10000).map(|i| format!("test_element_{}", i)).collect();
 
             if let Some(peak_memory) = get_memory_usage_mb() {
                 let memory_increase = peak_memory - initial_memory;
                 println!("📈 Memory increase: {} MB", memory_increase);
 
                 // Memory should stay bounded (under reasonable limits)
-                assert!(memory_increase < 100, "Memory increase should be reasonable");
+                assert!(
+                    memory_increase < 100,
+                    "Memory increase should be reasonable"
+                );
                 println!("✅ Memory usage stays bounded during processing");
             }
         } else {
@@ -94,10 +81,14 @@ mod benchmark_tests {
         println!("📊 Sequential processing: {:?}", sequential_duration);
         println!("📊 Parallel processing:   {:?}", parallel_duration);
 
-        assert_eq!(sequential_work, parallel_work, "Results should be identical");
+        assert_eq!(
+            sequential_work, parallel_work,
+            "Results should be identical"
+        );
 
         if parallel_duration < sequential_duration {
-            let speedup = sequential_duration.as_nanos() as f64 / parallel_duration.as_nanos() as f64;
+            let speedup =
+                sequential_duration.as_nanos() as f64 / parallel_duration.as_nanos() as f64;
             println!("⚡ Parallel speedup: {:.2}x", speedup);
             println!("✅ Parallel processing shows performance improvement");
         } else {
@@ -111,8 +102,8 @@ mod benchmark_tests {
 
         // Test that Rayon can utilize multiple threads
         use rayon::prelude::*;
-        use std::sync::{Arc, Mutex};
         use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
 
         let thread_ids = Arc::new(Mutex::new(HashSet::new()));
 
@@ -133,7 +124,10 @@ mod benchmark_tests {
 
             // Calculate potential CPU utilization
             let potential_utilization = (unique_threads as f64 / num_cpus as f64) * 100.0;
-            println!("📊 Potential CPU utilization: {:.1}%", potential_utilization);
+            println!(
+                "📊 Potential CPU utilization: {:.1}%",
+                potential_utilization
+            );
 
             if potential_utilization >= 800.0 {
                 println!("🎯 Capable of >800% CPU utilization!");
@@ -156,9 +150,8 @@ mod benchmark_tests {
         // Simulate producer (parallel processing)
         let producer = thread::spawn(move || {
             for batch in 0..10 {
-                let batch_data: Vec<String> = (0..1000)
-                    .map(|i| format!("item_{}_{}", batch, i))
-                    .collect();
+                let batch_data: Vec<String> =
+                    (0..1000).map(|i| format!("item_{}_{}", batch, i)).collect();
 
                 if tx.send(batch_data).is_err() {
                     break;
@@ -182,9 +175,14 @@ mod benchmark_tests {
         let streaming_duration = consumer_start.elapsed();
         producer.join().unwrap();
 
-        println!("📊 Streamed {} items in {:?}", total_items, streaming_duration);
-        println!("📊 Average throughput: {:.0} items/sec",
-                total_items as f64 / streaming_duration.as_secs_f64());
+        println!(
+            "📊 Streamed {} items in {:?}",
+            total_items, streaming_duration
+        );
+        println!(
+            "📊 Average throughput: {:.0} items/sec",
+            total_items as f64 / streaming_duration.as_secs_f64()
+        );
 
         assert_eq!(total_items, 10000, "Should process all items");
         println!("✅ Streaming architecture works correctly");
@@ -222,11 +220,7 @@ mod integration_tests {
     fn test_pbf_file_availability() {
         println!("🔍 Checking for test PBF files...");
 
-        let test_files = [
-            "tests/test.osm.pbf",
-            "test.osm.pbf",
-            "../test.osm.pbf"
-        ];
+        let test_files = ["tests/test.osm.pbf", "test.osm.pbf", "../test.osm.pbf"];
 
         let mut found_file = None;
         for file_path in &test_files {
@@ -239,11 +233,16 @@ mod integration_tests {
         if let Some(file_path) = found_file {
             println!("✅ Found test PBF file: {}", file_path);
             println!("ℹ️  To test parallel processing with real data:");
-            println!("    cargo run --release -- --parallel {} --output /tmp/parallel_test.json", file_path);
+            println!(
+                "    cargo run --release -- --parallel {} --output /tmp/parallel_test.json",
+                file_path
+            );
         } else {
             println!("ℹ️  No test PBF files found. To test with real data:");
             println!("    1. Download a PBF file (e.g., from https://download.geofabrik.de/)");
-            println!("    2. Run: cargo run --release -- --parallel input.pbf --output output.json");
+            println!(
+                "    2. Run: cargo run --release -- --parallel input.pbf --output output.json"
+            );
             println!("    3. Monitor with: htop or top to verify >800% CPU usage");
         }
     }

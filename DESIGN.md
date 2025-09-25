@@ -292,17 +292,48 @@ if !Path::new(input_path).exists() {
 
 ## Future Enhancements
 
-### 1. Advanced Tag Filtering
-**Current Limitation**: Only supports OR logic (comma-separated tags)
-```bash
-# Currently supported
---tags "addr:housenumber,addr:street"  # OR logic
+### 1. Enhanced Tag Filtering System
+**Fully Implemented**: Comprehensive AND/OR/wildcard filtering system surpassing original pbf2json capabilities.
 
-# Not yet supported
---tags "addr:housenumber+name"  # AND logic
+**Supported Syntax**:
+```bash
+# OR logic (comma-separated)
+--tags "addr:housenumber,addr:street,name"
+
+# AND logic (plus-separated)
+--tags "addr:street+name+amenity"
+
+# Wildcard patterns
+--tags "addr*"           # Prefix: addr:street, addr:city, etc.
+--tags "*:en"            # Suffix: name:en, addr:street:en, etc.
+--tags "addr:*:en"       # Middle: addr:street:en, etc.
+--tags "*"               # All: any element with tags
+
+# Complex combinations
+--tags "addr*+name,tourism+*:en,highway"
+# Means: (addr* AND name) OR (tourism AND *:en) OR highway
 ```
 
-**Future Implementation**: Parse '+' syntax for AND logic matching original pbf2json.
+**Implementation**:
+```rust
+pub fn matches_filter(&self, filter_tags: &[Vec<String>]) -> bool {
+    // OR logic between groups
+    filter_tags.iter().any(|and_group| {
+        // AND logic within each group
+        and_group.iter().all(|pattern| self.matches_tag_pattern(pattern))
+    })
+}
+
+pub fn matches_tag_pattern(&self, pattern: &str) -> bool {
+    // Supports *, prefix*, *suffix, and complex patterns
+}
+```
+
+**Advantages over Original**:
+- ✅ **Complete wildcard support**: prefix, suffix, middle patterns
+- ✅ **Unlimited complexity**: arbitrary AND/OR combinations
+- ✅ **Multilingual support**: `name*`, `*:en` patterns for international data
+- ✅ **Performance optimized**: Efficient pattern matching algorithm
 
 ### 2. LevelDB Integration for Planet-Scale Relations
 **Current**: Relations only get geometry for small files (<100MB)

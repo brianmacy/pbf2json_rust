@@ -65,13 +65,34 @@ fn main() -> Result<()> {
         anyhow::bail!("Input file does not exist: {}", input_path);
     }
 
-    let tags: Option<Vec<String>> =
-        tag_filter.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+    // Parse tag filter supporting both AND (+) and OR (,) logic
+    // Format: "tag1+tag2,tag3,tag4+tag5" means (tag1 AND tag2) OR tag3 OR (tag4 AND tag5)
+    let tags: Option<Vec<Vec<String>>> = tag_filter.map(|t| {
+        t.split(',') // Split by comma for OR groups
+            .map(|group| {
+                group
+                    .split('+') // Split by plus for AND within each group
+                    .map(|tag| tag.trim().to_string())
+                    .collect::<Vec<String>>()
+            })
+            .collect::<Vec<Vec<String>>>()
+    });
 
     if use_parallel {
-        parallel_converter::convert_pbf_to_geojson_parallel(input_path, output_path, tags, pretty_print)?;
+        parallel_converter::convert_pbf_to_geojson_parallel(
+            input_path,
+            output_path,
+            tags,
+            pretty_print,
+        )?;
     } else {
-        converter::convert_pbf_to_geojson_with_geometry_level(input_path, output_path, tags, pretty_print, geometry_level)?;
+        converter::convert_pbf_to_geojson_with_geometry_level(
+            input_path,
+            output_path,
+            tags,
+            pretty_print,
+            geometry_level,
+        )?;
     }
 
     Ok(())

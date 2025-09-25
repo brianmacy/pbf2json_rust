@@ -1,6 +1,5 @@
 // Tests for parallel PBF processing
 use pbf2json::convert_pbf_to_geojson_parallel;
-use std::fs;
 use tempfile::NamedTempFile;
 
 #[test]
@@ -43,7 +42,10 @@ fn test_cpu_core_detection() {
     if num_cpus >= 8 {
         println!("✅ System has sufficient cores for >800% CPU utilization target");
     } else {
-        println!("⚠️  System has {} cores - may not achieve >800% CPU utilization", num_cpus);
+        println!(
+            "⚠️  System has {} cores - may not achieve >800% CPU utilization",
+            num_cpus
+        );
     }
 }
 
@@ -55,7 +57,10 @@ fn test_memory_monitoring() {
 
     // Test memory monitoring function works on Linux
     let contents = fs::read_to_string("/proc/self/status");
-    assert!(contents.is_ok(), "Should be able to read /proc/self/status on Linux");
+    assert!(
+        contents.is_ok(),
+        "Should be able to read /proc/self/status on Linux"
+    );
 
     let contents = contents.unwrap();
     let has_vmrss = contents.lines().any(|line| line.starts_with("VmRSS:"));

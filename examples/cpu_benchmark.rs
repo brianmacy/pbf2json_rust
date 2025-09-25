@@ -1,9 +1,8 @@
 // CPU utilization benchmark example
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::thread;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 fn main() {
     println!("🚀 CPU Utilization Benchmark for Parallel PBF Processing");
@@ -37,22 +36,26 @@ fn benchmark_rayon_performance() {
 
     // Sequential benchmark
     let start = Instant::now();
-    let sequential_result: u64 = (0..data_size)
-        .map(|i| expensive_computation(i))
-        .sum();
+    let sequential_result: u64 = (0..data_size).map(expensive_computation).sum();
     let sequential_time = start.elapsed();
 
-    println!("Sequential: {:?} (result: {})", sequential_time, sequential_result);
+    println!(
+        "Sequential: {:?} (result: {})",
+        sequential_time, sequential_result
+    );
 
     // Parallel benchmark
     let start = Instant::now();
     let parallel_result: u64 = (0..data_size)
         .into_par_iter()
-        .map(|i| expensive_computation(i))
+        .map(expensive_computation)
         .sum();
     let parallel_time = start.elapsed();
 
-    println!("Parallel:   {:?} (result: {})", parallel_time, parallel_result);
+    println!(
+        "Parallel:   {:?} (result: {})",
+        parallel_time, parallel_result
+    );
 
     // Calculate speedup
     if parallel_time < sequential_time {
@@ -61,7 +64,10 @@ fn benchmark_rayon_performance() {
 
         // Estimate CPU utilization
         let estimated_utilization = speedup * 100.0;
-        println!("📊 Estimated CPU utilization: {:.0}%", estimated_utilization);
+        println!(
+            "📊 Estimated CPU utilization: {:.0}%",
+            estimated_utilization
+        );
 
         if estimated_utilization >= 800.0 {
             println!("🎯 Target >800% CPU utilization achieved!");
@@ -79,7 +85,10 @@ fn benchmark_simulated_pbf_processing() {
     let num_blobs = 1000;
     let elements_per_blob = 5000;
 
-    println!("Processing {} blobs with {} elements each...", num_blobs, elements_per_blob);
+    println!(
+        "Processing {} blobs with {} elements each...",
+        num_blobs, elements_per_blob
+    );
 
     let start = Instant::now();
 
@@ -97,9 +106,14 @@ fn benchmark_simulated_pbf_processing() {
 
     let processing_time = start.elapsed();
 
-    println!("Processed {} elements in {:?}", total_processed, processing_time);
-    println!("Throughput: {:.0} elements/sec",
-             total_processed as f64 / processing_time.as_secs_f64());
+    println!(
+        "Processed {} elements in {:?}",
+        total_processed, processing_time
+    );
+    println!(
+        "Throughput: {:.0} elements/sec",
+        total_processed as f64 / processing_time.as_secs_f64()
+    );
 
     let expected_elements = num_blobs * elements_per_blob;
     assert_eq!(total_processed, expected_elements);
@@ -113,7 +127,10 @@ fn benchmark_memory_bounded_processing() {
     let chunk_size = 50_000;
     let num_chunks = 20;
 
-    println!("Processing {} chunks of {} elements each...", num_chunks, chunk_size);
+    println!(
+        "Processing {} chunks of {} elements each...",
+        num_chunks, chunk_size
+    );
 
     let total_counter = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
@@ -137,7 +154,10 @@ fn benchmark_memory_bounded_processing() {
     let processing_time = start.elapsed();
     let total_processed = total_counter.load(Ordering::Relaxed);
 
-    println!("Processed {} elements in {:?}", total_processed, processing_time);
+    println!(
+        "Processed {} elements in {:?}",
+        total_processed, processing_time
+    );
     println!("Memory-bounded processing: Chunks processed independently");
     println!("✅ Memory bounded parallel processing complete");
 

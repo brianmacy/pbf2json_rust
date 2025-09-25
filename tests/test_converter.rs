@@ -22,15 +22,15 @@ fn test_element_matches_filter() {
         tags: building_tags,
     });
 
-    let highway_filter = vec!["highway".to_string()];
+    let highway_filter = vec![vec!["highway".to_string()]];
     assert!(highway_element.matches_filter(&highway_filter));
     assert!(!building_element.matches_filter(&highway_filter));
 
-    let building_filter = vec!["building".to_string()];
+    let building_filter = vec![vec!["building".to_string()]];
     assert!(!highway_element.matches_filter(&building_filter));
     assert!(building_element.matches_filter(&building_filter));
 
-    let multi_filter = vec!["highway".to_string(), "building".to_string()];
+    let multi_filter = vec![vec!["highway".to_string()], vec!["building".to_string()]];
     assert!(highway_element.matches_filter(&multi_filter));
     assert!(building_element.matches_filter(&multi_filter));
 
