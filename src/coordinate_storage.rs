@@ -8,11 +8,12 @@ pub struct CoordinateStorage {
     env: Environment,
     db: Database,
     temp_path: Option<PathBuf>, // Track if we created a temp directory for cleanup
-    keep_temp_db: bool, // Whether to keep the temp database on drop
+    keep_temp_db: bool,         // Whether to keep the temp database on drop
 }
 
 impl CoordinateStorage {
     /// Create coordinate storage at specified path, or temp dir if None
+    #[allow(dead_code)]
     pub fn new(db_path: Option<&Path>) -> Result<Self> {
         Self::new_with_cleanup(db_path, false)
     }
@@ -51,11 +52,13 @@ impl CoordinateStorage {
     }
 
     /// Create coordinate storage in default temp location
+    #[allow(dead_code)]
     pub fn new_temp() -> Result<Self> {
         Self::new(None)
     }
 
     /// Store coordinates for a node ID
+    #[allow(dead_code)]
     pub fn store_node(&self, node_id: i64, lat: f64, lon: f64) -> Result<()> {
         let mut txn = self.env.begin_rw_txn()?;
         let key = node_id.to_be_bytes();
@@ -78,6 +81,7 @@ impl CoordinateStorage {
     }
 
     /// Retrieve coordinates for a node ID
+    #[allow(dead_code)]
     pub fn get_node(&self, node_id: i64) -> Result<Option<(f64, f64)>> {
         let txn = self.env.begin_ro_txn()?;
         let key = node_id.to_be_bytes();
@@ -136,12 +140,22 @@ impl Drop for CoordinateStorage {
         if let Some(temp_path) = &self.temp_path {
             if !self.keep_temp_db {
                 if let Err(e) = fs::remove_dir_all(temp_path) {
-                    eprintln!("Warning: Failed to remove temp database {}: {}", temp_path.display(), e);
+                    eprintln!(
+                        "Warning: Failed to remove temp database {}: {}",
+                        temp_path.display(),
+                        e
+                    );
                 } else {
-                    eprintln!("✅ Temporary coordinate database deleted: {}", temp_path.display());
+                    eprintln!(
+                        "✅ Temporary coordinate database deleted: {}",
+                        temp_path.display()
+                    );
                 }
             } else {
-                eprintln!("📁 Temporary coordinate database preserved: {}", temp_path.display());
+                eprintln!(
+                    "📁 Temporary coordinate database preserved: {}",
+                    temp_path.display()
+                );
             }
         }
     }
@@ -157,7 +171,7 @@ mod tests {
 
         // Store some coordinates
         storage.store_node(123, 40.7128, -74.0060)?; // NYC
-        storage.store_node(456, 51.5074, -0.1278)?;  // London
+        storage.store_node(456, 51.5074, -0.1278)?; // London
 
         // Retrieve single coordinate
         let nyc = storage.get_node(123)?;

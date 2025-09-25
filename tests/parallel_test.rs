@@ -22,8 +22,11 @@ fn test_parallel_processing_with_dummy_data() {
     let result = convert_pbf_to_geojson_parallel(
         non_existent_file,
         Some(&output_path),
-        None,  // no tag filter
-        false, // not pretty print
+        None,   // no tag filter
+        false,  // not pretty print
+        "auto", // geometry level
+        None,   // temp db path
+        false,  // keep temp db
     );
 
     // Should fail because file doesn't exist - that's expected

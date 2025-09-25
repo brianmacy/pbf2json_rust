@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 const CHUNK_SIZE: usize = 10_000; // Process elements in chunks for streaming output
+const MEMORY_LIMIT_MB: u64 = 8192; // 8GB memory limit
+const MEMORY_CHECK_INTERVAL: usize = 50; // Check memory every 50 batches
 
 /// Parallel PBF to GeoJSON converter with streaming output and >800% CPU utilization
 pub fn convert_pbf_to_geojson_parallel(
@@ -50,13 +52,23 @@ pub fn convert_pbf_to_geojson_parallel(
             }
         }
         _ => {
-            eprintln!("Unknown geometry level '{}', defaulting to auto", geometry_level);
+            eprintln!(
+                "Unknown geometry level '{}', defaulting to auto",
+                geometry_level
+            );
             file_size_gb <= 1.0
         }
     };
 
     if use_geometry {
-        convert_parallel_with_geometry(input_path, output_path, tag_filter, pretty_print, temp_db_path, keep_temp_db)
+        convert_parallel_with_geometry(
+            input_path,
+            output_path,
+            tag_filter,
+            pretty_print,
+            temp_db_path,
+            keep_temp_db,
+        )
     } else {
         convert_parallel_basic(input_path, output_path, tag_filter, pretty_print)
     }
@@ -82,7 +94,13 @@ fn convert_parallel_with_geometry(
     // Phase 2: Parallel processing with geometry computation
     eprintln!("Phase 2: Processing elements with parallel geometry computation...");
     let coordinate_storage = Arc::new(coordinate_storage);
-    process_with_parallel_geometry(input_path, output_path, tag_filter, pretty_print, coordinate_storage)
+    process_with_parallel_geometry(
+        input_path,
+        output_path,
+        tag_filter,
+        pretty_print,
+        coordinate_storage,
+    )
 }
 
 /// Original parallel converter without geometry computation
@@ -129,6 +147,12 @@ fn convert_parallel_basic(
                     );
                     if let Some(memory_usage) = get_memory_usage_mb() {
                         eprintln!("🧠 Memory usage: {} MB", memory_usage);
+                        if memory_usage > MEMORY_LIMIT_MB {
+                            eprintln!(
+                                "⚠️ Memory limit exceeded ({} MB), processing may slow",
+                                memory_usage
+                            );
+                        }
                     }
                 }
             }
@@ -145,44 +169,90 @@ fn convert_parallel_basic(
     // PARALLEL PROCESSING APPROACH 1: Custom blob-level parallelization
     let file = File::open(input_path).context("Failed to open PBF file")?;
     let buf_reader = std::io::BufReader::new(file);
-    let blob_reader = BlobReader::new(buf_reader);
+    let mut blob_reader = BlobReader::new(buf_reader);
 
-    // Process blobs in parallel using rayon
-    let processing_result: Result<()> =
-        blob_reader
-            .par_bridge()
-            .try_for_each(|blob_result| -> Result<()> {
-                let blob = blob_result.context("Failed to read blob")?;
+    // Process blobs sequentially but elements in parallel (avoids par_bridge memory accumulation)
+    let processing_result: Result<()> = {
+        let mut batch_count = 0;
+        blob_reader.try_for_each(|blob_result| -> Result<()> {
+            let blob = blob_result.context("Failed to read blob")?;
 
-                match blob.decode() {
-                    Ok(BlobDecode::OsmData(block)) => {
-                        // Process all elements in this block in parallel
-                        let json_results: Vec<String> = block
-                            .elements()
-                            .par_bridge()
-                            .filter_map(|element| {
-                                process_element_to_json(element, &tag_filter_clone, pretty_print)
-                            })
-                            .collect();
+            match blob.decode() {
+                Ok(BlobDecode::OsmData(block)) => {
+                    // MEMORY-BOUNDED: Process elements in streaming batches
+                    let mut element_batch = Vec::with_capacity(CHUNK_SIZE);
+                    let mut processed_count = 0;
 
-                        // Send results in chunks to maintain bounded memory
-                        for chunk in json_results.chunks(CHUNK_SIZE) {
-                            if tx.send(chunk.to_vec()).is_err() {
+                    for element in block.elements() {
+                        element_batch.push(element);
+
+                        // Process batch when full
+                        if element_batch.len() >= CHUNK_SIZE {
+                            let json_results: Vec<String> = element_batch
+                                .par_iter()
+                                .filter_map(|element| {
+                                    process_element_to_json(
+                                        element.clone(),
+                                        &tag_filter_clone,
+                                        pretty_print,
+                                    )
+                                })
+                                .collect();
+
+                            // Send results immediately and clear batch
+                            if !json_results.is_empty() && tx.send(json_results).is_err() {
                                 return Err(anyhow::anyhow!("Output channel closed"));
+                            }
+
+                            // Clear to prevent memory accumulation
+                            element_batch.clear();
+                            processed_count += CHUNK_SIZE;
+
+                            // Memory monitoring
+                            if processed_count % (CHUNK_SIZE * MEMORY_CHECK_INTERVAL) == 0
+                                && let Some(memory_usage) = get_memory_usage_mb()
+                                && memory_usage > MEMORY_LIMIT_MB
+                            {
+                                eprintln!(
+                                    "⚠️ Memory threshold reached: {} MB, pausing...",
+                                    memory_usage
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(100));
                             }
                         }
                     }
-                    Ok(BlobDecode::OsmHeader(_)) => {
-                        // Skip header blobs
-                    }
-                    Ok(BlobDecode::Unknown(_)) => {
-                        // Skip unknown blobs
-                    }
-                    Err(e) => return Err(anyhow::anyhow!("Blob decode error: {}", e)),
-                }
 
-                Ok(())
-            });
+                    // Process remaining elements
+                    if !element_batch.is_empty() {
+                        let json_results: Vec<String> = element_batch
+                            .par_iter()
+                            .filter_map(|element| {
+                                process_element_to_json(
+                                    element.clone(),
+                                    &tag_filter_clone,
+                                    pretty_print,
+                                )
+                            })
+                            .collect();
+
+                        if !json_results.is_empty() && tx.send(json_results).is_err() {
+                            return Err(anyhow::anyhow!("Output channel closed"));
+                        }
+                    }
+                }
+                Ok(BlobDecode::OsmHeader(_)) => {
+                    // Skip header blobs
+                }
+                Ok(BlobDecode::Unknown(_)) => {
+                    // Skip unknown blobs
+                }
+                Err(e) => return Err(anyhow::anyhow!("Blob decode error: {}", e)),
+            }
+
+            batch_count += 1;
+            Ok(())
+        })
+    };
 
     // Close the channel to signal completion
     drop(tx);
@@ -198,64 +268,62 @@ fn convert_parallel_basic(
 }
 
 /// Create coordinate storage for parallel processing
-fn create_coordinate_storage(temp_db_path: Option<&String>, keep_temp_db: bool) -> Result<CoordinateStorage> {
-    let db_path = temp_db_path.map(|p| Path::new(p));
+fn create_coordinate_storage(
+    temp_db_path: Option<&String>,
+    keep_temp_db: bool,
+) -> Result<CoordinateStorage> {
+    let db_path = temp_db_path.map(Path::new);
     CoordinateStorage::new_with_cleanup(db_path, keep_temp_db)
 }
 
 /// Collect coordinates in parallel with thread-safe writes
-fn collect_coordinates_parallel(
-    storage: &CoordinateStorage,
-    input_path: &str
-) -> Result<u64> {
-    let reader = BlobReader::from_path(input_path)
+fn collect_coordinates_parallel(storage: &CoordinateStorage, input_path: &str) -> Result<u64> {
+    let mut reader = BlobReader::from_path(input_path)
         .context("Failed to open PBF file for coordinate collection")?;
 
     // Use Arc<Mutex<>> for thread-safe coordinate writing
     let storage_mutex = Arc::new(Mutex::new(storage));
     let node_count = Arc::new(Mutex::new(0u64));
 
-    reader
-        .par_bridge()
-        .try_for_each(|blob_result| -> Result<()> {
-            let blob = blob_result.context("Failed to read blob")?;
-            match blob.decode().context("Failed to decode blob")? {
-                BlobDecode::OsmData(data) => {
-                    let mut batch_nodes = Vec::new();
+    reader.try_for_each(|blob_result| -> Result<()> {
+        let blob = blob_result.context("Failed to read blob")?;
+        match blob.decode().context("Failed to decode blob")? {
+            BlobDecode::OsmData(data) => {
+                let mut batch_nodes = Vec::new();
 
-                    // Process elements in this blob
-                    for element in data.elements() {
-                        match element {
-                            Element::Node(node) => {
-                                batch_nodes.push((node.id(), node.lat(), node.lon()));
-                            }
-                            Element::DenseNode(dense_node) => {
-                                batch_nodes.push((dense_node.id(), dense_node.lat(), dense_node.lon()));
-                            }
-                            _ => {} // Skip ways and relations in coordinate collection phase
+                // Process elements in this blob
+                for element in data.elements() {
+                    match element {
+                        Element::Node(node) => {
+                            batch_nodes.push((node.id(), node.lat(), node.lon()));
                         }
-                    }
-
-                    // Write batch to storage (thread-safe)
-                    if !batch_nodes.is_empty() {
-                        let storage_guard = storage_mutex.lock().unwrap();
-                        storage_guard.store_nodes(&batch_nodes)?;
-
-                        let mut count_guard = node_count.lock().unwrap();
-                        *count_guard += batch_nodes.len() as u64;
-                        drop(count_guard);
-                        drop(storage_guard);
+                        Element::DenseNode(dense_node) => {
+                            batch_nodes.push((dense_node.id(), dense_node.lat(), dense_node.lon()));
+                        }
+                        _ => {} // Skip ways and relations in coordinate collection phase
                     }
                 }
-                BlobDecode::OsmHeader(_) => {
-                    // Skip header blobs
-                }
-                BlobDecode::Unknown(_) => {
-                    // Skip unknown blobs
+
+                // Write batch to storage (thread-safe)
+                if !batch_nodes.is_empty() {
+                    let storage_guard = storage_mutex.lock().unwrap();
+                    storage_guard.store_nodes(&batch_nodes)?;
+
+                    let mut count_guard = node_count.lock().unwrap();
+                    *count_guard += batch_nodes.len() as u64;
+                    drop(count_guard);
+                    drop(storage_guard);
                 }
             }
-            Ok(())
-        })?;
+            BlobDecode::OsmHeader(_) => {
+                // Skip header blobs
+            }
+            BlobDecode::Unknown(_) => {
+                // Skip unknown blobs
+            }
+        }
+        Ok(())
+    })?;
 
     storage.sync()?;
     let final_count = *node_count.lock().unwrap();
@@ -298,48 +366,103 @@ fn process_with_parallel_geometry(
                 batch_count += 1;
 
                 if batch_count % 100 == 0 {
-                    eprintln!("📊 Processed {} batches, {} total features", batch_count, total_features);
+                    eprintln!(
+                        "📊 Processed {} batches, {} total features",
+                        batch_count, total_features
+                    );
 
                     // Memory monitoring (should stay low with disk storage)
                     if let Some(memory_usage) = get_memory_usage_mb() {
                         eprintln!("🧠 Memory usage: {} MB", memory_usage);
+                        if memory_usage > MEMORY_LIMIT_MB {
+                            eprintln!(
+                                "⚠️ Memory limit exceeded ({} MB), processing may slow",
+                                memory_usage
+                            );
+                        }
                     }
                 }
             }
 
             writer.flush()?;
-            eprintln!("✅ Parallel streaming complete. Total features: {}", total_features);
+            eprintln!(
+                "✅ Parallel streaming complete. Total features: {}",
+                total_features
+            );
             Ok(())
         })
     };
 
     // Process PBF file in parallel with geometry computation
-    let reader = BlobReader::from_path(input_path)
-        .context("Failed to open PBF file for processing")?;
+    let mut reader =
+        BlobReader::from_path(input_path).context("Failed to open PBF file for processing")?;
 
-    let processing_result = reader
-        .par_bridge()
-        .try_for_each(|blob_result| -> Result<()> {
+    let processing_result = {
+        let mut batch_count = 0;
+        reader.try_for_each(|blob_result| -> Result<()> {
             let blob = blob_result.context("Failed to read blob")?;
             match blob.decode().context("Failed to decode blob")? {
                 BlobDecode::OsmData(data) => {
-                    // Memory-bounded parallel approach: process elements in chunks with streaming output
-                    let elements: Vec<_> = data.elements().collect();
+                    // MEMORY-BOUNDED: Stream process without collecting all elements
+                    let mut element_batch = Vec::with_capacity(CHUNK_SIZE);
+                    let mut processed_count = 0;
 
-                    // Process elements in parallel chunks to maintain memory bounds
-                    for chunk in elements.chunks(CHUNK_SIZE) {
-                        let json_results: Vec<String> = chunk
+                    for element in data.elements() {
+                        element_batch.push(element);
+
+                        // Process batch when full
+                        if element_batch.len() >= CHUNK_SIZE {
+                            let json_results: Vec<String> = element_batch
+                                .par_iter()
+                                .filter_map(|element| {
+                                    process_element_with_geometry(
+                                        element.clone(),
+                                        &tag_filter_clone,
+                                        pretty_print,
+                                        &coordinate_storage,
+                                    )
+                                })
+                                .collect();
+
+                            // Send results immediately and clear batch to free memory
+                            if !json_results.is_empty() && tx.send(json_results).is_err() {
+                                return Err(anyhow::anyhow!("Output channel closed"));
+                            }
+
+                            // Clear batch to prevent memory accumulation
+                            element_batch.clear();
+                            processed_count += CHUNK_SIZE;
+
+                            // Memory check every MEMORY_CHECK_INTERVAL batches
+                            if processed_count % (CHUNK_SIZE * MEMORY_CHECK_INTERVAL) == 0
+                                && let Some(memory_usage) = get_memory_usage_mb()
+                                && memory_usage > MEMORY_LIMIT_MB
+                            {
+                                eprintln!(
+                                    "⚠️ Memory threshold reached: {} MB, pausing...",
+                                    memory_usage
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                        }
+                    }
+
+                    // Process remaining elements in final batch
+                    if !element_batch.is_empty() {
+                        let json_results: Vec<String> = element_batch
                             .par_iter()
                             .filter_map(|element| {
-                                process_element_with_geometry(element.clone(), &tag_filter_clone, pretty_print, &coordinate_storage)
+                                process_element_with_geometry(
+                                    element.clone(),
+                                    &tag_filter_clone,
+                                    pretty_print,
+                                    &coordinate_storage,
+                                )
                             })
                             .collect();
 
-                        // Send results immediately to prevent accumulation
-                        if !json_results.is_empty() {
-                            if tx.send(json_results).is_err() {
-                                return Err(anyhow::anyhow!("Output channel closed"));
-                            }
+                        if !json_results.is_empty() && tx.send(json_results).is_err() {
+                            return Err(anyhow::anyhow!("Output channel closed"));
                         }
                     }
                 }
@@ -350,8 +473,10 @@ fn process_with_parallel_geometry(
                     // Skip unknown blobs
                 }
             }
+            batch_count += 1;
             Ok(())
-        });
+        })
+    };
 
     // Close the channel to signal completion
     drop(tx);
@@ -376,10 +501,10 @@ fn process_element_with_geometry(
     let osm_element = convert_element_to_osm(element)?;
 
     // Apply tag filter
-    if let Some(filter_tags) = tag_filter {
-        if !osm_element.matches_filter(filter_tags) {
-            return None;
-        }
+    if let Some(filter_tags) = tag_filter
+        && !osm_element.matches_filter(filter_tags)
+    {
+        return None;
     }
 
     // Convert to JSON with geometry if applicable
@@ -400,7 +525,11 @@ fn process_element_with_geometry(
         }
         OsmElement::Relation(relation) => {
             if !relation.tags.is_empty() {
-                convert_relation_to_json_with_parallel_geometry(relation, coordinate_storage, pretty_print)
+                convert_relation_to_json_with_parallel_geometry(
+                    relation,
+                    coordinate_storage,
+                    pretty_print,
+                )
             } else {
                 None
             }
@@ -463,17 +592,18 @@ fn convert_relation_to_json_with_parallel_geometry(
     use serde_json::json;
 
     // For relations, collect coordinates from node members
-    let node_ids: Vec<i64> = relation.members
+    let node_ids: Vec<i64> = relation
+        .members
         .iter()
         .filter(|m| m.member_type == MemberType::Node)
         .map(|m| m.member_id)
         .collect();
 
     let mut all_coordinates = Vec::new();
-    if !node_ids.is_empty() {
-        if let Ok(coords) = storage.get_nodes(&node_ids) {
-            all_coordinates.extend(coords.into_iter().flatten());
-        }
+    if !node_ids.is_empty()
+        && let Ok(coords) = storage.get_nodes(&node_ids)
+    {
+        all_coordinates.extend(coords.into_iter().flatten());
     }
 
     let mut record = json!({
@@ -522,7 +652,10 @@ fn convert_relation_to_json_with_parallel_geometry(
             })
             .collect();
 
-        record.as_object_mut().unwrap().insert("members".to_string(), json!(members_json));
+        record
+            .as_object_mut()
+            .unwrap()
+            .insert("members".to_string(), json!(members_json));
     }
 
     if pretty_print {
@@ -716,10 +849,10 @@ fn process_element_to_json(
     let osm_element = convert_element_to_osm(element)?;
 
     // Apply tag filter
-    if let Some(filter_tags) = tag_filter {
-        if !osm_element.matches_filter(filter_tags) {
-            return None;
-        }
+    if let Some(filter_tags) = tag_filter
+        && !osm_element.matches_filter(filter_tags)
+    {
+        return None;
     }
 
     // Convert to JSON (basic mode - no geometry)

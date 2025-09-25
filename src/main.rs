@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::{Arg, Command};
 use std::path::Path;
 
-mod coordinate_storage;
 mod converter;
+mod coordinate_storage;
 mod osm;
 mod parallel_converter;
 

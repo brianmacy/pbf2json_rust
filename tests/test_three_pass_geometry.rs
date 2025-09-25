@@ -29,6 +29,7 @@ mod three_pass_tests {
             false,                                // No pretty print for easier parsing
             "full",                               // Force full geometry mode
             None,                                 // Use default temp db location
+            false,                                // Don't keep temp db
         );
 
         assert!(result.is_ok(), "Conversion should succeed");
@@ -155,6 +156,7 @@ mod three_pass_tests {
             false,
             "auto", // Auto mode should select full geometry
             None,   // Use default temp db location
+            false,  // Don't keep temp db
         );
 
         assert!(result.is_ok(), "Auto mode conversion should succeed");
