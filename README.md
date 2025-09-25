@@ -103,16 +103,19 @@ pbf2json city.osm.pbf --tags highway -o roads.json
 pbf2json planet.osm.pbf --tags highway -o planet-roads.json
 # → Automatically uses basic mode for memory efficiency
 
-# Force full geometry (use with caution on large files)
+# Force full geometry with disk-based coordinate storage
 pbf2json large-region.pbf --geometry full --tags amenity -o poi.json
-# → May require significant memory
+# → Uses disk-based storage, no memory limits
 ```
 
 #### Parallel Processing
 ```bash
-# Enable parallel processing for maximum CPU utilization
-pbf2json large-file.pbf --parallel --tags highway -o roads.json
+# Parallel processing is enabled by default for maximum CPU utilization
+pbf2json large-file.pbf --tags highway -o roads.json
 # → Achieves 800%+ CPU utilization on multi-core systems
+
+# Disable parallel processing if needed
+pbf2json small-file.pbf --no-parallel --tags highway -o roads.json
 ```
 
 ## Common Use Cases & Examples
@@ -213,7 +216,9 @@ OPTIONS:
                             • Complex: addr*+name,tourism+*:en
     -g, --geometry <LEVEL>  Geometry computation level: auto, basic, full [default: auto]
     -p, --pretty            Pretty-print JSON output
-        --parallel          Enable parallel processing for >800% CPU utilization
+        --parallel          Enable parallel processing (enabled by default)
+        --no-parallel       Disable parallel processing
+        --temp-db <PATH>    Directory for temporary coordinate database (default: system temp)
     -h, --help              Print help information
     -V, --version           Print version information
 ```
@@ -221,7 +226,7 @@ OPTIONS:
 #### Geometry Levels
 - **`auto`** (default): Automatically choose based on file size
 - **`basic`**: Fast streaming mode, no geometry computation
-- **`full`**: Complete geometry with centroids and bounds
+- **`full`**: Complete geometry with centroids and bounds (uses disk-based storage)
 
 ## Output Format
 
@@ -326,27 +331,38 @@ The converter uses an intelligent multi-strategy architecture that adapts to fil
 - **Very small files**: Three-pass processing with complete relation geometry
 - **Small files**: Two-pass processing with way centroids and bounds
 - Computes centroids and bounds for ways and relations (when possible)
-- Requires significant memory for coordinate storage
-- Best accuracy but memory-intensive
+- Uses disk-based LMDB coordinate storage
+- Best accuracy with minimal memory usage
 
 ### Memory-Aware Processing
 
 ```
 File Size    | Auto Strategy | Memory Usage | Geometry Quality
 -------------|---------------|--------------|------------------
-< 100MB      | Three-Pass   | ~50-100MB    | Complete (ways+relations with centroids+bounds)
-100MB-1GB    | Two-Pass     | ~200MB       | Good (ways with centroids+bounds)
+< 100MB      | Three-Pass   | ~20MB        | Complete (ways+relations with centroids+bounds)
+100MB-1GB    | Two-Pass     | ~30MB        | Good (ways with centroids+bounds)
 1GB-10GB     | Streaming    | ~10MB        | Basic (no geometry computation)
 10GB+        | Streaming    | ~10MB        | Basic (no geometry computation)
 Planet       | Streaming    | ~10MB        | Basic (no geometry computation)
 ```
 
+### Disk-Based Coordinate Storage
+
+For full geometry mode (`--geometry full`), the tool uses LMDB (Lightning Memory-Mapped Database) for coordinate storage:
+
+- **High Performance**: LMDB provides fast key-value storage with memory-mapped files
+- **Memory Efficient**: Only coordinate cache in RAM, not all coordinate data
+- **Scalable**: Handles planet-scale files without memory exhaustion
+- **Temporary**: Database is automatically cleaned up after processing
+- **Configurable**: Use `--temp-db <path>` to specify storage location
+
 ### Parallel Processing Architecture
 
-- **CPU Utilization**: 500%+ across multiple cores
-- **Element Processing**: Parallel via Rayon `par_map_reduce`
+- **CPU Utilization**: 800%+ across multiple cores (enabled by default)
+- **Element Processing**: Parallel via `par_map_reduce` from osmpbf
 - **Output Streaming**: Background thread with bounded channels
 - **Memory Bounded**: Fixed buffer sizes prevent unbounded growth
+- **Disk Storage**: LMDB coordinate cache for geometry computation
 
 ## Technical Limitations & Trade-offs
 
@@ -357,7 +373,7 @@ The implementation uses different strategies to balance memory usage with geomet
 | Mode | Memory Usage | Geometry Quality | Use Case |
 |------|--------------|------------------|-----------|
 | **Basic** | ~10MB | No geometry | Planet-scale processing |
-| **Full** | File-dependent | Perfect geometry | City/region processing |
+| **Full** | ~20-30MB | Perfect geometry | Any size file with disk storage |
 | **Auto** | Adaptive | Size-optimized | General use |
 
 ### Relation Geometry Support

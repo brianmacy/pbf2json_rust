@@ -28,6 +28,7 @@ mod three_pass_tests {
             Some(vec![vec!["type".to_string()]]), // Filter for relations with type tag
             false,                                // No pretty print for easier parsing
             "full",                               // Force full geometry mode
+            None,                                 // Use default temp db location
         );
 
         assert!(result.is_ok(), "Conversion should succeed");
@@ -153,6 +154,7 @@ mod three_pass_tests {
             Some(vec![vec!["multipolygon".to_string()]]),
             false,
             "auto", // Auto mode should select full geometry
+            None,   // Use default temp db location
         );
 
         assert!(result.is_ok(), "Auto mode conversion should succeed");

@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Arg, Command};
 use std::path::Path;
 
+mod coordinate_storage;
 mod converter;
 mod osm;
 mod parallel_converter;
@@ -41,7 +42,14 @@ fn main() -> Result<()> {
             Arg::new("parallel")
                 .long("parallel")
                 .action(clap::ArgAction::SetTrue)
-                .help("Enable parallel processing for >800% CPU utilization"),
+                .default_value("true")
+                .help("Enable parallel processing for >800% CPU utilization (enabled by default)"),
+        )
+        .arg(
+            Arg::new("no-parallel")
+                .long("no-parallel")
+                .action(clap::ArgAction::SetTrue)
+                .help("Disable parallel processing and use single-threaded mode"),
         )
         .arg(
             Arg::new("geometry")
@@ -52,14 +60,28 @@ fn main() -> Result<()> {
                 .value_parser(["auto", "basic", "full"])
                 .default_value("auto"),
         )
+        .arg(
+            Arg::new("temp-db")
+                .long("temp-db")
+                .value_name("PATH")
+                .help("Directory for temporary coordinate database (default: system temp)"),
+        )
+        .arg(
+            Arg::new("keep-temp-db")
+                .long("keep-temp-db")
+                .action(clap::ArgAction::SetTrue)
+                .help("Keep temporary coordinate database after conversion (useful for debugging)"),
+        )
         .get_matches();
 
     let input_path = matches.get_one::<String>("input").unwrap();
     let output_path = matches.get_one::<String>("output");
     let tag_filter = matches.get_one::<String>("tags");
     let pretty_print = matches.get_flag("pretty");
-    let use_parallel = matches.get_flag("parallel");
+    let use_parallel = !matches.get_flag("no-parallel");
     let geometry_level = matches.get_one::<String>("geometry").unwrap();
+    let temp_db_path = matches.get_one::<String>("temp-db");
+    let keep_temp_db = matches.get_flag("keep-temp-db");
 
     if !Path::new(input_path).exists() {
         anyhow::bail!("Input file does not exist: {}", input_path);
@@ -84,6 +106,9 @@ fn main() -> Result<()> {
             output_path,
             tags,
             pretty_print,
+            geometry_level,
+            temp_db_path,
+            keep_temp_db,
         )?;
     } else {
         converter::convert_pbf_to_geojson_with_geometry_level(
@@ -92,6 +117,8 @@ fn main() -> Result<()> {
             tags,
             pretty_print,
             geometry_level,
+            temp_db_path,
+            keep_temp_db,
         )?;
     }
 

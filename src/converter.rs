@@ -1,10 +1,12 @@
+use crate::coordinate_storage::CoordinateStorage;
 use crate::osm::{MemberType, OsmElement, OsmNode, OsmRelation, OsmRelationMember, OsmWay};
 use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::mpsc;
+use std::path::Path;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 const MEMORY_LIMIT_GB: u64 = 8;
@@ -15,6 +17,8 @@ pub fn convert_pbf_to_geojson_with_geometry_level(
     tag_filter: Option<Vec<Vec<String>>>,
     pretty_print: bool,
     geometry_level: &str,
+    temp_db_path: Option<&String>,
+    keep_temp_db: bool,
 ) -> Result<()> {
     let file_size = std::fs::metadata(input_path)
         .context("Failed to get file metadata")?
@@ -30,7 +34,7 @@ pub fn convert_pbf_to_geojson_with_geometry_level(
             false
         }
         "full" => {
-            eprintln!("Using full geometry format (may require significant memory)...");
+            eprintln!("Using full geometry format with disk-based coordinate storage...");
             true
         }
         "auto" => {
@@ -57,9 +61,9 @@ pub fn convert_pbf_to_geojson_with_geometry_level(
             eprintln!(
                 "Very small file, attempting three-pass processing with relation geometry..."
             );
-            convert_pbf_with_complete_geometry(input_path, output_path, tag_filter, pretty_print)
+            convert_pbf_with_complete_geometry(input_path, output_path, tag_filter, pretty_print, temp_db_path, keep_temp_db)
         } else {
-            convert_pbf_with_full_geometry(input_path, output_path, tag_filter, pretty_print)
+            convert_pbf_with_full_geometry(input_path, output_path, tag_filter, pretty_print, temp_db_path, keep_temp_db)
         }
     } else {
         convert_pbf_streaming_only(input_path, output_path, tag_filter, pretty_print)
@@ -71,23 +75,22 @@ fn convert_pbf_with_full_geometry(
     output_path: Option<&String>,
     tag_filter: Option<Vec<Vec<String>>>,
     pretty_print: bool,
+    temp_db_path: Option<&String>,
+    keep_temp_db: bool,
 ) -> Result<()> {
-    // TWO-PASS APPROACH for complete pbf2json compatibility
-    eprintln!("Pass 1: Collecting all node coordinates...");
-    let all_nodes = collect_all_nodes(input_path)?;
-    eprintln!(
-        "Collected {} node coordinates ({:.1}MB memory)",
-        all_nodes.len(),
-        all_nodes.len() as f64 * 16.0 / 1_048_576.0
-    );
+    // TWO-PASS APPROACH with disk-based coordinate storage
+    eprintln!("Pass 1: Collecting all node coordinates to disk database...");
+    let coordinate_storage = create_coordinate_storage(temp_db_path, keep_temp_db)?;
+    let node_count = collect_all_nodes_to_disk(input_path, &coordinate_storage)?;
+    eprintln!("Stored {} node coordinates in disk database", node_count);
 
     eprintln!("Pass 2: Processing elements with full geometry...");
     let reader = ElementReader::from_path(input_path).context("Failed to open PBF file")?;
 
-    // Streaming architecture with complete geometry computation
+    // Streaming architecture with disk-based geometry computation
     let (tx, rx) = mpsc::sync_channel::<String>(1000);
     let tag_filter_clone = tag_filter.clone();
-    let all_nodes_clone = all_nodes;
+    let coordinate_storage = Arc::new(coordinate_storage);
 
     // Spawn background thread for immediate output streaming
     let output_thread = {
@@ -139,10 +142,10 @@ fn convert_pbf_with_full_geometry(
     };
 
     // PARALLEL PROCESSING: Use par_map_reduce for multi-core processing
+    let coordinate_storage_for_processing = coordinate_storage.clone();
     reader.par_map_reduce(
-        |element| {
+        move |element| {
             // Parallel map: Process each element on available CPU cores
-
             let mut results = Vec::new();
             if let Some(osm_element) = process_element(element, &tag_filter_clone) {
                 let json_opt = match &osm_element {
@@ -155,9 +158,9 @@ fn convert_pbf_with_full_geometry(
                     }
                     OsmElement::Way(way) => {
                         if !way.tags.is_empty() {
-                            convert_way_to_json_with_full_geometry(
+                            convert_way_to_json_with_disk_geometry(
                                 way,
-                                &all_nodes_clone,
+                                &coordinate_storage_for_processing,
                                 pretty_print,
                             )
                         } else {
@@ -166,9 +169,9 @@ fn convert_pbf_with_full_geometry(
                     }
                     OsmElement::Relation(relation) => {
                         if !relation.tags.is_empty() {
-                            convert_relation_to_json_with_full_geometry(
+                            convert_relation_to_json_with_disk_geometry(
                                 relation,
-                                &all_nodes_clone,
+                                &coordinate_storage_for_processing,
                                 pretty_print,
                             )
                         } else {
@@ -407,36 +410,47 @@ fn calculate_bounds(coordinates: &[(f64, f64)]) -> Bounds {
     }
 }
 
-fn collect_all_nodes(input_path: &str) -> Result<HashMap<i64, (f64, f64)>> {
+fn create_coordinate_storage(temp_db_path: Option<&String>, keep_temp_db: bool) -> Result<CoordinateStorage> {
+    let db_path = temp_db_path.map(|p| Path::new(p));
+    CoordinateStorage::new_with_cleanup(db_path, keep_temp_db)
+}
+
+fn collect_all_nodes_to_disk(input_path: &str, storage: &CoordinateStorage) -> Result<u64> {
     let reader = ElementReader::from_path(input_path)
         .context("Failed to open PBF file for node collection")?;
 
-    // PARALLEL NODE COLLECTION: Use par_map_reduce for multi-core node processing
-    let nodes = reader.par_map_reduce(
+    // PARALLEL NODE COLLECTION to disk
+    let all_nodes = reader.par_map_reduce(
         |element| {
-            // Parallel map: Process elements on available CPU cores
-
-            let mut local_nodes = HashMap::new();
+            // Collect nodes for this thread
+            let mut batch_nodes = Vec::new();
             match element {
                 Element::Node(node) => {
-                    local_nodes.insert(node.id(), (node.lat(), node.lon()));
+                    batch_nodes.push((node.id(), node.lat(), node.lon()));
                 }
                 Element::DenseNode(dense_node) => {
-                    local_nodes.insert(dense_node.id(), (dense_node.lat(), dense_node.lon()));
+                    batch_nodes.push((dense_node.id(), dense_node.lat(), dense_node.lon()));
                 }
                 _ => {} // Skip ways and relations in pass 1
             }
-            local_nodes
+            batch_nodes
         },
-        HashMap::new,
-        |mut acc, batch| {
-            // Reduce: Merge node collections
-            acc.extend(batch);
+        Vec::new,
+        |mut acc, mut batch| {
+            // Combine batches from different threads
+            acc.append(&mut batch);
             acc
         },
     )?;
 
-    Ok(nodes)
+    // Store all nodes to disk in one operation
+    let node_count = all_nodes.len() as u64;
+    if !all_nodes.is_empty() {
+        storage.store_nodes(&all_nodes)?;
+    }
+
+    storage.sync()?; // Ensure all data is written to disk
+    Ok(node_count)
 }
 
 fn convert_pbf_streaming_only(
@@ -562,23 +576,18 @@ fn convert_pbf_with_complete_geometry(
     output_path: Option<&String>,
     tag_filter: Option<Vec<Vec<String>>>,
     pretty_print: bool,
+    temp_db_path: Option<&String>,
+    keep_temp_db: bool,
 ) -> Result<()> {
-    // THREE-PASS APPROACH for complete relation geometry (small files only)
-    eprintln!("Pass 1: Collecting all node coordinates...");
-    let all_nodes = collect_all_nodes(input_path)?;
-    eprintln!(
-        "Collected {} node coordinates ({:.1}MB memory)",
-        all_nodes.len(),
-        all_nodes.len() as f64 * 16.0 / 1_048_576.0
-    );
+    // THREE-PASS APPROACH with disk-based storage for complete relation geometry
+    eprintln!("Pass 1: Collecting all node coordinates to disk database...");
+    let coordinate_storage = create_coordinate_storage(temp_db_path, keep_temp_db)?;
+    let node_count = collect_all_nodes_to_disk(input_path, &coordinate_storage)?;
+    eprintln!("Stored {} node coordinates in disk database", node_count);
 
-    eprintln!("Pass 2: Collecting all way geometries...");
-    let all_ways = collect_all_ways_with_geometry(input_path, &all_nodes)?;
-    eprintln!(
-        "Collected {} way geometries ({:.1}MB memory)",
-        all_ways.len(),
-        all_ways.len() as f64 * 200.0 / 1_048_576.0
-    ); // Estimate ~200 bytes per way
+    eprintln!("Pass 2: Collecting all way geometries with disk storage...");
+    let all_ways = collect_all_ways_with_disk_geometry(input_path, &coordinate_storage)?;
+    eprintln!("Collected {} way geometries using disk storage", all_ways.len());
 
     eprintln!("Pass 3: Processing all elements with complete geometry...");
     let reader = ElementReader::from_path(input_path).context("Failed to open PBF file")?;
@@ -586,7 +595,7 @@ fn convert_pbf_with_complete_geometry(
     // Streaming architecture with complete geometry computation
     let (tx, rx) = mpsc::sync_channel::<String>(1000);
     let tag_filter_clone = tag_filter.clone();
-    let all_nodes_clone = all_nodes.clone();
+    let coordinate_storage = Arc::new(coordinate_storage);
     let all_ways_clone = all_ways;
 
     // Spawn background thread for immediate output streaming
@@ -628,8 +637,9 @@ fn convert_pbf_with_complete_geometry(
     };
 
     // PARALLEL PROCESSING: Complete geometry computation
+    let coordinate_storage_for_processing = coordinate_storage.clone();
     reader.par_map_reduce(
-        |element| {
+        move |element| {
             // Parallel map: Process each element on available CPU cores
             let mut results = Vec::new();
             if let Some(osm_element) = process_element(element, &tag_filter_clone) {
@@ -643,9 +653,9 @@ fn convert_pbf_with_complete_geometry(
                     }
                     OsmElement::Way(way) => {
                         if !way.tags.is_empty() {
-                            convert_way_to_json_with_full_geometry(
+                            convert_way_to_json_with_disk_geometry(
                                 way,
-                                &all_nodes_clone,
+                                &coordinate_storage_for_processing,
                                 pretty_print,
                             )
                         } else {
@@ -708,6 +718,53 @@ struct WayGeometry {
     centroid: (f64, f64),
     #[allow(dead_code)]
     bounds: Bounds,
+}
+
+fn collect_all_ways_with_disk_geometry(
+    input_path: &str,
+    storage: &CoordinateStorage,
+) -> Result<HashMap<i64, WayGeometry>> {
+    let reader = ElementReader::from_path(input_path)
+        .context("Failed to open PBF file for way collection")?;
+
+    let ways = reader.par_map_reduce(
+        |element| {
+            let mut local_ways = HashMap::new();
+            if let Element::Way(way) = element {
+                let node_refs: Vec<i64> = way.refs().collect();
+
+                // Get coordinates from disk storage
+                match storage.get_nodes(&node_refs) {
+                    Ok(coords) => {
+                        let coordinates: Vec<(f64, f64)> = coords.into_iter().flatten().collect();
+
+                        if !coordinates.is_empty() {
+                            let centroid = calculate_centroid(&coordinates);
+                            let bounds = calculate_bounds(&coordinates);
+                            let way_geometry = WayGeometry {
+                                id: way.id(),
+                                coordinates,
+                                centroid,
+                                bounds,
+                            };
+                            local_ways.insert(way.id(), way_geometry);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to get coordinates for way {}: {}", way.id(), e);
+                    }
+                }
+            }
+            local_ways
+        },
+        HashMap::new,
+        |mut acc, batch| {
+            acc.extend(batch);
+            acc
+        },
+    )?;
+
+    Ok(ways)
 }
 
 fn collect_all_ways_with_geometry(
@@ -827,6 +884,54 @@ fn convert_relation_to_json_with_way_resolution(
     }
 }
 
+fn convert_way_to_json_with_disk_geometry(
+    way: &OsmWay,
+    storage: &Arc<CoordinateStorage>,
+    pretty_print: bool,
+) -> Option<String> {
+    use serde_json::json;
+
+    // Get coordinates from disk storage
+    let coordinates: Vec<(f64, f64)> = match storage.get_nodes(&way.node_refs) {
+        Ok(coords) => coords.into_iter().flatten().collect(),
+        Err(e) => {
+            eprintln!("Warning: Failed to get coordinates for way {}: {}", way.id, e);
+            return convert_way_to_json(way, pretty_print);
+        }
+    };
+
+    if coordinates.is_empty() {
+        return convert_way_to_json(way, pretty_print);
+    }
+
+    let (centroid_lat, centroid_lon) = calculate_centroid(&coordinates);
+    let bounds = calculate_bounds(&coordinates);
+
+    let record = json!({
+        "id": way.id,
+        "type": "way",
+        "nodes": way.node_refs,
+        "tags": way.tags,
+        "centroid": {
+            "lat": format!("{:.7}", centroid_lat),
+            "lon": format!("{:.7}", centroid_lon),
+            "type": "centroid"
+        },
+        "bounds": {
+            "n": format!("{:.7}", bounds.north),
+            "s": format!("{:.7}", bounds.south),
+            "e": format!("{:.7}", bounds.east),
+            "w": format!("{:.7}", bounds.west)
+        }
+    });
+
+    if pretty_print {
+        serde_json::to_string_pretty(&record).ok()
+    } else {
+        serde_json::to_string(&record).ok()
+    }
+}
+
 fn convert_way_to_json_with_full_geometry(
     way: &OsmWay,
     all_nodes: &HashMap<i64, (f64, f64)>,
@@ -865,6 +970,93 @@ fn convert_way_to_json_with_full_geometry(
             "w": format!("{:.7}", bounds.west)
         }
     });
+
+    if pretty_print {
+        serde_json::to_string_pretty(&record).ok()
+    } else {
+        serde_json::to_string(&record).ok()
+    }
+}
+
+fn convert_relation_to_json_with_disk_geometry(
+    relation: &OsmRelation,
+    storage: &Arc<CoordinateStorage>,
+    pretty_print: bool,
+) -> Option<String> {
+    use serde_json::json;
+
+    // For relations, collect coordinates from any node members
+    let mut node_ids = Vec::new();
+    for member in &relation.members {
+        if member.member_type == MemberType::Node {
+            node_ids.push(member.member_id);
+        }
+    }
+
+    let mut all_coordinates = Vec::new();
+    if !node_ids.is_empty() {
+        match storage.get_nodes(&node_ids) {
+            Ok(coords) => {
+                all_coordinates.extend(coords.into_iter().flatten());
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to get coordinates for relation {}: {}", relation.id, e);
+            }
+        }
+    }
+
+    let mut record = json!({
+        "id": relation.id,
+        "type": "relation",
+        "tags": relation.tags
+    });
+
+    // If we have coordinates, compute centroid and bounds
+    if !all_coordinates.is_empty() {
+        let (centroid_lat, centroid_lon) = calculate_centroid(&all_coordinates);
+        let bounds = calculate_bounds(&all_coordinates);
+
+        record.as_object_mut().unwrap().insert(
+            "centroid".to_string(),
+            json!({
+                "lat": format!("{:.7}", centroid_lat),
+                "lon": format!("{:.7}", centroid_lon),
+                "type": "entrance"  // Match GoLang pbf2json format
+            }),
+        );
+
+        record.as_object_mut().unwrap().insert(
+            "bounds".to_string(),
+            json!({
+                "n": format!("{:.7}", bounds.north),
+                "s": format!("{:.7}", bounds.south),
+                "e": format!("{:.7}", bounds.east),
+                "w": format!("{:.7}", bounds.west)
+            }),
+        );
+    } else {
+        // Fall back to including members if no geometry available
+        let members_json: Vec<serde_json::Value> = relation
+            .members
+            .iter()
+            .map(|member| {
+                json!({
+                    "type": match member.member_type {
+                        MemberType::Node => "node",
+                        MemberType::Way => "way",
+                        MemberType::Relation => "relation",
+                    },
+                    "ref": member.member_id,
+                    "role": member.role
+                })
+            })
+            .collect();
+
+        record
+            .as_object_mut()
+            .unwrap()
+            .insert("members".to_string(), json!(members_json));
+    }
 
     if pretty_print {
         serde_json::to_string_pretty(&record).ok()
